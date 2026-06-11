@@ -349,9 +349,9 @@ def main():
     global game_data
     game_data = load_data()
 
-    TOKEN = os.getenv("8675720922:AAFauNR5YY_VThTFaJ_m1Qwz-DZyg6MQsos")
+    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     if not TOKEN:
-        raise ValueError("Установите переменную окружения TELEGRAM_BOT_TOKEN")
+        raise ValueError("8675720922:AAFauNR5YY_VThTFaJ_m1Qwz-DZyg6MQsos")
 
     app = Application.builder().token(TOKEN).build()
 

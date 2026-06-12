@@ -347,7 +347,7 @@ def main():
     global game_data
     game_data = load_data()
 
-    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    TOKEN = os.getenv("8675720922:AAFauNR5YY_VThTFaJ_m1Qwz-DZyg6MQsos")
     if not TOKEN:
         raise ValueError("8675720922:AAFauNR5YY_VThTFaJ_m1Qwz-DZyg6MQsos")
 

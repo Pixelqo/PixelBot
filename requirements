@@ -3,9 +3,9 @@ import json
 import random
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, time as dt_time, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # Настройка логирования
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 # Файл данных
 DATA_FILE = "game_data.json"
-ADMIN_IDS = {8237260298}  # замените на ваш Telegram ID
+ADMIN_IDS = {8237260298}  # ваш Telegram ID
 
 # ---------- ДАННЫЕ ПО УМОЛЧАНИЮ ----------
 DEFAULT_PRICES = {
@@ -40,27 +40,26 @@ DEFAULT_USER_DATA = {
     "businesses": {},
     "portfolio": {"stocks": {}, "crypto": {}},
     "total_dividends_received": 0,
-    "last_dividend_payout": 0,
     "taxes_paid": 0,
     "tax_evasion_counter": 0,
     "tax_holiday_until": None
 }
 
-# Бизнесы (id: {name, price, base_income, upgrade_cost, requirements_text})
+# Бизнесы
 BUSINESS_DEFINITIONS = {
     "freelance": {"name": "Фриланс", "price": 1000, "base_income": 20, "upgrade_cost": 500, "requirements": "нет"},
-    "coffee_shop": {"name": "Кофейня", "price": 10000, "base_income": 100, "upgrade_cost": 5000, "requirements": "кофеварка (имущество)"},
+    "coffee_shop": {"name": "Кофейня", "price": 10000, "base_income": 100, "upgrade_cost": 5000, "requirements": "кофеварка"},
     "online_store": {"name": "Интернет-магазин", "price": 25000, "base_income": 250, "upgrade_cost": 10000, "requirements": "компьютер, телефон"},
     "car_service": {"name": "Автосервис", "price": 50000, "base_income": 500, "upgrade_cost": 20000, "requirements": "гараж"},
-    "restaurant": {"name": "Ресторан", "price": 100000, "base_income": 1000, "upgrade_cost": 40000, "requirements": "повар (найм)"},
+    "restaurant": {"name": "Ресторан", "price": 100000, "base_income": 1000, "upgrade_cost": 40000, "requirements": "повар"},
     "it_startup": {"name": "IT-стартап", "price": 200000, "base_income": 2000, "upgrade_cost": 80000, "requirements": "офис"},
     "logistics": {"name": "Логистика", "price": 500000, "base_income": 5000, "upgrade_cost": 200000, "requirements": "грузовик"},
     "hotel": {"name": "Отель", "price": 1000000, "base_income": 10000, "upgrade_cost": 400000, "requirements": "здание"},
     "oil_rig": {"name": "Нефтяная вышка", "price": 10000000, "base_income": 100000, "upgrade_cost": 5000000, "requirements": "лицензия"},
-    "space_agency": {"name": "Космическое агентство", "price": 100000000, "base_income": 1000000, "upgrade_cost": 50000000, "requirements": "10 бизнесов, 1 млн заработано"}
+    "space_agency": {"name": "Космическое агентство", "price": 100000000, "base_income": 1000000, "upgrade_cost": 50000000, "requirements": "10 бизнесов"}
 }
 
-# Фондовый рынок
+# Фондовый рынок и крипта
 STOCKS = {
     "AAPL": {"name": "Apple Inc.", "price": 150, "trend": 0.02, "volatility": 0.05, "dividend_yield": 0.005},
     "GOOGL": {"name": "Google", "price": 2800, "trend": 0.01, "volatility": 0.04, "dividend_yield": 0.0},
@@ -199,7 +198,6 @@ def calculate_asset_value(user):
     for item, qty in inv.items():
         if item in game_data["prices"]:
             total += game_data["prices"][item] * qty
-    # Стоимость бизнесов (цена покупки + улучшения)
     for biz_id, biz in user.get("businesses", {}).items():
         if biz.get("level", 0) > 0:
             total += biz.get("purchased_at", 0) + biz.get("upgrade_cost", 0) * (biz.get("level", 1)-1)
@@ -212,7 +210,7 @@ def calculate_income_tax(total_income_today, total_wealth):
 def calculate_property_tax(user):
     inv = user.get("inventory", {})
     houses = inv.get("house", 0)
-    cars = sum(inv.get(c, 0) for c in ["car", "business_car", "sports_car", "suv", "economy_car"])
+    cars = inv.get("car", 0) + inv.get("business_car", 0) + inv.get("sports_car", 0) + inv.get("suv", 0) + inv.get("economy_car", 0)
     boats = inv.get("boat", 0) + inv.get("speedboat", 0) + inv.get("yacht", 0)
     return houses * 100 + cars * 50 + boats * 200
 
@@ -234,13 +232,12 @@ def get_effective_income(user_id, biz_id, base_income):
     final_comp = (global_comp + local_comp) // 2
     return int(base_income * (1 - (final_comp - 1) / 10))
 
-# ---------- ОБНОВЛЕНИЕ РЫНКА (КАЖДЫЙ ЧАС) ----------
+# ---------- ОБНОВЛЕНИЕ РЫНКА ----------
 async def update_market_prices(context: ContextTypes.DEFAULT_TYPE):
     now = time.time()
     if now - game_data.get("last_market_update", 0) < 3600:
         return
     game_data["last_market_update"] = now
-    # Акции
     for sym, data in game_data["stock_market"].items():
         change = random.uniform(-data["volatility"], data["volatility"]) + data["trend"]
         data["price"] = max(1, data["price"] * (1 + change))
@@ -248,7 +245,6 @@ async def update_market_prices(context: ContextTypes.DEFAULT_TYPE):
         game_data["stock_history"][sym].append(data["price"])
         if len(game_data["stock_history"][sym]) > 720:
             game_data["stock_history"][sym].pop(0)
-    # Крипта
     for sym, data in game_data["crypto_market"].items():
         change = random.uniform(-data["volatility"], data["volatility"]) + data["trend"]
         data["price"] = max(0.01, data["price"] * (1 + change))
@@ -258,13 +254,11 @@ async def update_market_prices(context: ContextTypes.DEFAULT_TYPE):
             game_data["crypto_history"][sym].pop(0)
     save_data(game_data)
 
-# ---------- ЕЖЕДНЕВНЫЕ НАЛОГИ И ДИВИДЕНДЫ ----------
 async def daily_economy_update(context: ContextTypes.DEFAULT_TYPE):
     for uid_str, user in game_data["users"].items():
         user_id = int(uid_str)
         if user.get("tax_holiday_until") and time.time() < user["tax_holiday_until"]:
             continue
-        # Подсчёт дохода от бизнесов за день (24 часа)
         total_business_income = 0
         for biz_id, biz_data in user.get("businesses", {}).items():
             if biz_data.get("level", 0) > 0:
@@ -282,9 +276,9 @@ async def daily_economy_update(context: ContextTypes.DEFAULT_TYPE):
             user["tax_evasion_counter"] = user.get("tax_evasion_counter", 0) + 1
         save_user(user_id)
         await context.bot.send_message(chat_id=user_id,
-            text=f"💰 Налоговый отчёт: списано {total_tax} монет (налог на доход {income_tax}, имущество {property_tax}). Баланс: {user['balance']}")
-    # Дивиденды по акциям (раз в неделю)
-    if datetime.now().weekday() == 0:  # понедельник
+            text=f"💰 Налоговый отчёт: списано {total_tax} монет. Баланс: {user['balance']}")
+    # Дивиденды по понедельникам
+    if datetime.now().weekday() == 0:
         await pay_dividends(context)
 
 async def pay_dividends(context: ContextTypes.DEFAULT_TYPE):
@@ -300,9 +294,8 @@ async def pay_dividends(context: ContextTypes.DEFAULT_TYPE):
             user["balance"] += total_div
             user["total_dividends_received"] = user.get("total_dividends_received", 0) + total_div
             save_user(user_id)
-            await context.bot.send_message(chat_id=user_id, text=f"💵 Дивиденды за неделю: +{total_div} монет!")
+            await context.bot.send_message(chat_id=user_id, text=f"💵 Дивиденды: +{total_div} монет!")
 
-# ---------- ОБНОВЛЕНИЕ ГЛОБАЛЬНОЙ КОНКУРЕНЦИИ ----------
 async def update_global_competition(context: ContextTypes.DEFAULT_TYPE):
     for biz in game_data["global_competition"]:
         game_data["global_competition"][biz] = random.randint(1, 10)
@@ -324,9 +317,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📋 Налоги/Конкуренция", callback_data="tax_menu")],
     ]
     await update.message.reply_text(
-        "🏙️ Добро пожаловать в симулятор жизни с полной экономикой!\n"
-        "💰 Работай, покупай имущество, развивай бизнес, инвестируй в акции и крипту.\n"
-        "Используй кнопки меню:",
+        "🏙️ Добро пожаловать в симулятор жизни!\n"
+        "💰 Работай, покупай имущество, развивай бизнес, инвестируй.\n"
+        "Используй кнопки:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -360,7 +353,6 @@ async def work(update, context, user_id, query):
         return
     base = 200
     happiness_bonus = int(user["happiness"] * 2)
-    # Транспортный бонус (имеющиеся авто)
     transport_bonus = 0
     inv = user.get("inventory", {})
     if inv.get("car", 0) > 0:
@@ -433,7 +425,6 @@ async def buy_item(update, context, user_id, query, item):
     user["balance"] -= price
     inv = user["inventory"]
     inv[item] = inv.get(item, 0) + 1
-    # Транспорт даёт счастье при покупке
     if item in ["car", "motorcycle", "bicycle", "boat"]:
         user["happiness"] = min(100, user["happiness"] + random.randint(5,15))
     save_user(user_id)
@@ -442,439 +433,4 @@ async def buy_item(update, context, user_id, query, item):
 
 async def sell_item_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    args = context.args
-    if not args:
-        await update.message.reply_text("Использование: /sell <предмет>")
-        return
-    item = args[0].lower()
-    user = get_user(user_id)
-    if user["inventory"].get(item, 0) <= 0:
-        await update.message.reply_text(f"У вас нет {item}.")
-        return
-    price = game_data["prices"].get(item)
-    if not price:
-        await update.message.reply_text("Этот предмет нельзя продать.")
-        return
-    sell_val = int(price * 0.7)
-    user["inventory"][item] -= 1
-    if user["inventory"][item] == 0:
-        del user["inventory"][item]
-    user["balance"] += sell_val
-    save_user(user_id)
-    await update.message.reply_text(f"✅ Продано {item} за {sell_val} монет. Баланс: {user['balance']}")
-
-async def show_stats(update, context, user_id, query):
-    user = get_user(user_id)
-    inv = user["inventory"]
-    total_items = sum(inv.values())
-    total_value = sum(game_data["prices"].get(i,0)*q for i,q in inv.items() if i in game_data["prices"])
-    text = (f"📊 Статистика:\n💰 Денег: {user['balance']}\n😊 Счастье: {user['happiness']}\n"
-            f"🏠 Имущества: {total_items} (≈{total_value} монет)\n"
-            f"💼 Заработано: {user['total_earned']}\n"
-            f"📈 Рабочая серия: {user['work_streak']}\n"
-            f"🧾 Уплачено налогов: {user.get('taxes_paid',0)}\n"
-            f"💵 Дивидендов получено: {user.get('total_dividends_received',0)}")
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]]))
-
-async def daily_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user = get_user(user_id)
-    now = datetime.now()
-    last = user.get("last_daily")
-    if last:
-        last_date = datetime.fromisoformat(last)
-        if (now - last_date).days < 1:
-            await update.message.reply_text("Вы уже получали бонус сегодня.")
-            return
-    bonus = random.randint(300,600)
-    user["balance"] += bonus
-    user["last_daily"] = now.isoformat()
-    save_user(user_id)
-    await update.message.reply_text(f"🎁 Ежедневный бонус: +{bonus} монет! Баланс: {user['balance']}")
-
-# ---------- БИЗНЕСЫ ----------
-async def business_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user = get_user(user_id)
-    text = "🏢 Ваши бизнесы:\n"
-    for biz_id, biz in user.get("businesses", {}).items():
-        if biz.get("level", 0) > 0:
-            name = BUSINESS_DEFINITIONS[biz_id]["name"]
-            income = get_effective_income(user_id, biz_id, biz["income"])
-            text += f"• {name} | ур.{biz['level']} | доход: {income}/час\n"
-    if not any(b.get("level",0)>0 for b in user.get("businesses",{}).values()):
-        text += "У вас нет бизнесов. Купите через /buy_business"
-    keyboard = [[InlineKeyboardButton("📈 Купить бизнес", callback_data="buy_business_menu")],
-                [InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def buy_business_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = []
-    for biz_id, defn in BUSINESS_DEFINITIONS.items():
-        keyboard.append([InlineKeyboardButton(f"{defn['name']} - {defn['price']}💰", callback_data=f"buy_biz_{biz_id}")])
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="business_menu")])
-    await query.edit_message_text("Выберите бизнес для покупки:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def purchase_business(update, context, user_id, query, biz_id):
-    user = get_user(user_id)
-    defn = BUSINESS_DEFINITIONS.get(biz_id)
-    if not defn:
-        await query.edit_message_text("Ошибка.")
-        return
-    if user["balance"] < defn["price"]:
-        await query.edit_message_text("❌ Не хватает денег.")
-        return
-    # Простая проверка требований (можно расширить)
-    if biz_id == "coffee_shop" and user["inventory"].get("coffee_machine", 0) == 0:
-        await query.edit_message_text("❌ Требуется кофеварка. Купите в магазине.")
-        return
-    if biz_id == "online_store" and (user["inventory"].get("computer", 0) == 0 or user["inventory"].get("phone", 0) == 0):
-        await query.edit_message_text("❌ Требуются компьютер и телефон.")
-        return
-    user["balance"] -= defn["price"]
-    user.setdefault("businesses", {})[biz_id] = {
-        "level": 1,
-        "manager": False,
-        "purchased_at": defn["price"],
-        "upgrade_cost": defn["upgrade_cost"],
-        "income": defn["base_income"]
-    }
-    save_user(user_id)
-    await query.edit_message_text(f"✅ Куплен {defn['name']}! Пассивный доход: {defn['base_income']}/час.",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ К бизнесам", callback_data="business_menu")]]))
-
-# ---------- РЫНОК (АКЦИИ / КРИПТА) ----------
-async def market_overview(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "📈 Фондовый рынок:\n"
-    for sym, data in game_data["stock_market"].items():
-        text += f"{sym} ({data['name']}): {data['price']}💰\n"
-    text += "\n₿ Криптовалюты:\n"
-    for sym, data in game_data["crypto_market"].items():
-        text += f"{sym}: {data['price']}🪙\n"
-    keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]]
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def buy_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if len(args) != 2:
-        await update.message.reply_text("Использование: /buy_stock <символ> <количество>")
-        return
-    sym = args[0].upper()
-    try:
-        qty = int(args[1])
-        if qty <= 0: raise ValueError
-    except:
-        await update.message.reply_text("Количество должно быть >0")
-        return
-    if sym not in game_data["stock_market"]:
-        await update.message.reply_text("Неверный символ.")
-        return
-    price = game_data["stock_market"][sym]["price"]
-    cost = int(price * qty)
-    user = get_user(update.effective_user.id)
-    if user["balance"] < cost:
-        await update.message.reply_text(f"Не хватает {cost} монет.")
-        return
-    user["balance"] -= cost
-    user.setdefault("portfolio", {}).setdefault("stocks", {})[sym] = user["portfolio"]["stocks"].get(sym, 0) + qty
-    save_user(update.effective_user.id)
-    await update.message.reply_text(f"✅ Куплено {qty} {sym} по {price}. Потрачено {cost} монет.")
-
-async def sell_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if len(args) != 2:
-        await update.message.reply_text("Использование: /sell_stock <символ> <количество>")
-        return
-    sym = args[0].upper()
-    try:
-        qty = int(args[1])
-        if qty <= 0: raise ValueError
-    except:
-        await update.message.reply_text("Количество должно быть >0")
-        return
-    user = get_user(update.effective_user.id)
-    if sym not in user.get("portfolio", {}).get("stocks", {}) or user["portfolio"]["stocks"].get(sym, 0) < qty:
-        await update.message.reply_text(f"У вас нет {qty} акций {sym}.")
-        return
-    price = game_data["stock_market"][sym]["price"]
-    income = int(price * qty)
-    user["balance"] += income
-    user["portfolio"]["stocks"][sym] -= qty
-    if user["portfolio"]["stocks"][sym] == 0:
-        del user["portfolio"]["stocks"][sym]
-    save_user(update.effective_user.id)
-    await update.message.reply_text(f"✅ Продано {qty} {sym} по {price}. Получено {income} монет.")
-
-async def buy_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if len(args) != 2:
-        await update.message.reply_text("Использование: /buy_crypto <символ> <количество>")
-        return
-    sym = args[0].upper()
-    try:
-        qty = float(args[1])
-        if qty <= 0: raise ValueError
-    except:
-        await update.message.reply_text("Количество должно быть >0")
-        return
-    if sym not in game_data["crypto_market"]:
-        await update.message.reply_text("Неверный символ.")
-        return
-    price = game_data["crypto_market"][sym]["price"]
-    cost = price * qty
-    user = get_user(update.effective_user.id)
-    if user["balance"] < cost:
-        await update.message.reply_text(f"Не хватает {cost:.2f} монет.")
-        return
-    user["balance"] -= cost
-    user.setdefault("portfolio", {}).setdefault("crypto", {})[sym] = user["portfolio"]["crypto"].get(sym, 0) + qty
-    save_user(update.effective_user.id)
-    await update.message.reply_text(f"✅ Куплено {qty} {sym} по {price}. Потрачено {cost:.2f} монет.")
-
-async def sell_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if len(args) != 2:
-        await update.message.reply_text("Использование: /sell_crypto <символ> <количество>")
-        return
-    sym = args[0].upper()
-    try:
-        qty = float(args[1])
-        if qty <= 0: raise ValueError
-    except:
-        await update.message.reply_text("Количество должно быть >0")
-        return
-    user = get_user(update.effective_user.id)
-    if sym not in user.get("portfolio", {}).get("crypto", {}) or user["portfolio"]["crypto"].get(sym, 0) < qty:
-        await update.message.reply_text(f"У вас нет {qty} {sym}.")
-        return
-    price = game_data["crypto_market"][sym]["price"]
-    income = price * qty
-    user["balance"] += income
-    user["portfolio"]["crypto"][sym] -= qty
-    if user["portfolio"]["crypto"][sym] == 0:
-        del user["portfolio"]["crypto"][sym]
-    save_user(update.effective_user.id)
-    await update.message.reply_text(f"✅ Продано {qty} {sym} по {price}. Получено {income:.2f} монет.")
-
-async def portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user = get_user(user_id)
-    text = "📊 Ваш портфель:\n\nАкции:\n"
-    stocks = user.get("portfolio", {}).get("stocks", {})
-    total = 0
-    for sym, qty in stocks.items():
-        price = game_data["stock_market"][sym]["price"]
-        val = price * qty
-        total += val
-        text += f"{sym}: {qty} шт. × {price} = {val:.2f}\n"
-    text += "\nКриптовалюты:\n"
-    crypto = user.get("portfolio", {}).get("crypto", {})
-    for sym, qty in crypto.items():
-        price = game_data["crypto_market"][sym]["price"]
-        val = price * qty
-        total += val
-        text += f"{sym}: {qty} × {price} = {val:.2f}\n"
-    text += f"\n💰 Общая стоимость: {total:.2f} монет\n💵 Наличные: {user['balance']}"
-    await update.message.reply_text(text)
-
-# ---------- ГРАФИКИ И СРАВНЕНИЕ ----------
-async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if len(args) < 1:
-        await update.message.reply_text("Использование: /chart <символ> [d/w/m]")
-        return
-    symbol = args[0].upper()
-    period = args[1].lower() if len(args) > 1 else 'd'
-    if period not in ('d','w','m'):
-        await update.message.reply_text("Период: d (день), w (неделя), m (месяц)")
-        return
-    if symbol in game_data["stock_market"]:
-        atype = "stock"
-        name = game_data["stock_market"][symbol]["name"]
-    elif symbol in game_data["crypto_market"]:
-        atype = "crypto"
-        name = game_data["crypto_market"][symbol]["name"]
-    else:
-        await update.message.reply_text("Символ не найден.")
-        return
-    prices, label = get_price_history(symbol, atype, period)
-    if len(prices) < 2:
-        await update.message.reply_text("Недостаточно данных.")
-        return
-    chart = generate_ascii_chart(prices)
-    await update.message.reply_text(f"📈 {symbol} ({name}) за {label}\n{chart}", parse_mode='Markdown')
-
-async def compare_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if len(args) < 2:
-        await update.message.reply_text("Использование: /compare <символ1> <символ2> [d/w/m]")
-        return
-    sym1 = args[0].upper()
-    sym2 = args[1].upper()
-    period = args[2].lower() if len(args) > 2 else 'd'
-    def get_info(sym):
-        if sym in game_data["stock_market"]:
-            return "stock", game_data["stock_market"][sym]["name"]
-        elif sym in game_data["crypto_market"]:
-            return "crypto", game_data["crypto_market"][sym]["name"]
-        return None, None
-    t1, n1 = get_info(sym1)
-    t2, n2 = get_info(sym2)
-    if not t1 or not t2:
-        await update.message.reply_text("Один из символов не найден.")
-        return
-    p1, _ = get_price_history(sym1, t1, period)
-    p2, _ = get_price_history(sym2, t2, period)
-    if len(p1) < 2 or len(p2) < 2:
-        await update.message.reply_text("Недостаточно данных для одного из активов.")
-        return
-    chart = generate_dual_ascii_chart(p1, p2, n1, n2)
-    period_label = {'d':'день','w':'неделю','m':'месяц'}[period]
-    await update.message.reply_text(f"📊 Сравнение {sym1} и {sym2} за {period_label}\n{chart}", parse_mode='Markdown')
-
-# ---------- НАЛОГИ И КОНКУРЕНЦИЯ ----------
-async def tax_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user = get_user(user_id)
-    wealth = user["balance"] + calculate_asset_value(user)
-    rate = min(0.3, 0.05 + (wealth / 1000000) * 0.1)
-    text = (f"📋 Налоговая ставка: {rate*100:.1f}%\n"
-            f"💰 Совокупное богатство: {wealth:.0f} монет\n"
-            f"🧾 Уплачено налогов: {user.get('taxes_paid',0)}\n"
-            f"🚨 Штрафов: {user.get('tax_evasion_counter',0)}\n"
-            f"🏝️ Каникулы до: {user.get('tax_holiday_until', 'нет')}")
-    keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def suppress_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    args = context.args
-    if not args:
-        await update.message.reply_text("Использование: /suppress <бизнес_id>")
-        return
-    biz_id = args[0]
-    user = get_user(user_id)
-    if biz_id not in user.get("businesses", {}) or user["businesses"][biz_id].get("level", 0) == 0:
-        await update.message.reply_text("У вас нет такого бизнеса.")
-        return
-    biz = user["businesses"][biz_id]
-    cost = biz["income"] * 24 * 5
-    if user["balance"] < cost:
-        await update.message.reply_text(f"Не хватает {cost} монет.")
-        return
-    user["balance"] -= cost
-    biz["suppression_end"] = time.time() + 7*86400
-    save_user(user_id)
-    await update.message.reply_text(f"✅ Конкуренция подавлена на 7 дней для {biz_id}.")
-
-# ---------- АДМИНСКИЕ ----------
-async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("Только админ.")
-        return
-    args = context.args
-    if len(args) != 2:
-        await update.message.reply_text("/set_price <товар> <цена>")
-        return
-    item, price_str = args
-    try:
-        price = int(price_str)
-        if price < 0: raise ValueError
-    except:
-        await update.message.reply_text("Цена должна быть неотрицательным числом.")
-        return
-    if item not in game_data["prices"]:
-        await update.message.reply_text("Товар не найден.")
-        return
-    game_data["prices"][item] = price
-    save_data(game_data)
-    await update.message.reply_text(f"✅ Цена {item} установлена {price}.")
-
-# ---------- ОБРАБОТЧИК КНОПОК ----------
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    data = query.data
-
-    if data == "back_to_menu":
-        await show_main_menu(query)
-    elif data == "finance":
-        await show_balance(update, context, user_id, query)
-    elif data == "work":
-        await work(update, context, user_id, query)
-    elif data == "property":
-        await show_property(update, context, user_id, query)
-    elif data == "fun":
-        await show_fun_menu(update, context, user_id, query)
-    elif data.startswith("fun_"):
-        await do_fun(update, context, user_id, query, data[4:])
-    elif data == "shop":
-        await show_shop(update, context, user_id, query)
-    elif data.startswith("buy_"):
-        item = data[4:]
-        await buy_item(update, context, user_id, query, item)
-    elif data == "business_menu":
-        await business_menu(update, context, user_id, query)
-    elif data == "buy_business_menu":
-        await buy_business_menu(update, context, user_id, query)
-    elif data.startswith("buy_biz_"):
-        biz_id = data[8:]
-        await purchase_business(update, context, user_id, query, biz_id)
-    elif data == "market_overview":
-        await market_overview(update, context, user_id, query)
-    elif data == "stats":
-        await show_stats(update, context, user_id, query)
-    elif data == "tax_menu":
-        await tax_menu(update, context, user_id, query)
-    else:
-        await query.edit_message_text("Неизвестная команда.")
-
-# ---------- MAIN ----------
-def main():
-    global game_data
-    game_data = load_data()
-
-    TOKEN = "8675720922:AAFauNR5YY_VThTFaJ_m1Qwz-DZyg6MQsos"
-    if not TOKEN:
-        raise ValueError("Установите TELEGRAM_BOT_TOKEN")
-
-    app = Application.builder().token(TOKEN).build()
-    job_queue = app.job_queue
-
-    # Регулярные задачи
-    job_queue.run_repeating(update_market_prices, interval=3600, first=10)
-    job_queue.run_daily(daily_economy_update, time=datetime.time(hour=0, minute=0, tzinfo=datetime.timezone.utc))
-    job_queue.run_weekly(update_global_competition, days=datetime.timedelta(days=1), time=datetime.time(hour=1, minute=0))
-
-    # Команды
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("sell", sell_item_command))
-    app.add_handler(CommandHandler("daily", daily_bonus))
-    app.add_handler(CommandHandler("buy_stock", buy_stock))
-    app.add_handler(CommandHandler("sell_stock", sell_stock))
-    app.add_handler(CommandHandler("buy_crypto", buy_crypto))
-    app.add_handler(CommandHandler("sell_crypto", sell_crypto))
-    app.add_handler(CommandHandler("portfolio", portfolio))
-    app.add_handler(CommandHandler("chart", chart_command))
-    app.add_handler(CommandHandler("compare", compare_command))
-    app.add_handler(CommandHandler("suppress", suppress_command))
-    app.add_handler(CommandHandler("set_price", set_price))
-    app.add_handler(CallbackQueryHandler(button_handler))
-
-    logger.info("Бот запущен")
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
-
-
-
-
-
-
-
-
-
-
-
+    args = context.arg
